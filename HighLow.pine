@@ -1,0 +1,348 @@
+//@version=5
+// ============================================================================
+// High-Low Levels Indicator for TradingView
+// Version: 1.0.6
+// Last Updated: 2026-10-08 00:15
+// Status: Fixed array bounds check on empty levels
+// Changes in v1.0.6: Added array.size() > 0 checks before loop iterations to prevent index out of bounds error
+// ============================================================================
+indicator("High-Low Levels", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// SETTINGS
+// ============================================================================
+
+grpMain = "Main"
+lookback_depth = input.int(10, "Lookback Depth", minval=1, maxval=500, group=grpMain)
+
+// Daily High
+grpDaily = "Daily High"
+dh_enabled = input(true, "Enabled", group=grpDaily)
+dh_color = input.color(color.new(color.green, 0), "Color", group=grpDaily)
+dh_width = input.int(1, "Width", minval=1, maxval=5, group=grpDaily)
+dh_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpDaily)
+
+// Daily Low
+grpDailyL = "Daily Low"
+dl_enabled = input(true, "Enabled", group=grpDailyL)
+dl_color = input.color(color.new(color.orange, 0), "Color", group=grpDailyL)
+dl_width = input.int(1, "Width", minval=1, maxval=5, group=grpDailyL)
+dl_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpDailyL)
+
+// Weekly High
+grpWeekly = "Weekly High"
+wh_enabled = input(true, "Enabled", group=grpWeekly)
+wh_color = input.color(color.new(color.purple, 0), "Color", group=grpWeekly)
+wh_width = input.int(1, "Width", minval=1, maxval=5, group=grpWeekly)
+wh_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpWeekly)
+
+// Weekly Low
+grpWeeklyL = "Weekly Low"
+wl_enabled = input(true, "Enabled", group=grpWeeklyL)
+wl_color = input.color(color.new(color.maroon, 0), "Color", group=grpWeeklyL)
+wl_width = input.int(1, "Width", minval=1, maxval=5, group=grpWeeklyL)
+wl_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpWeeklyL)
+
+// Monthly High
+grpMonthly = "Monthly High"
+mh_enabled = input(true, "Enabled", group=grpMonthly)
+mh_color = input.color(color.new(color.lime, 0), "Color", group=grpMonthly)
+mh_width = input.int(1, "Width", minval=1, maxval=5, group=grpMonthly)
+mh_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpMonthly)
+
+// Monthly Low
+grpMonthlyL = "Monthly Low"
+ml_enabled = input(true, "Enabled", group=grpMonthlyL)
+ml_color = input.color(color.new(color.red, 0), "Color", group=grpMonthlyL)
+ml_width = input.int(1, "Width", minval=1, maxval=5, group=grpMonthlyL)
+ml_style = input.string("solid", "Style", options=["solid", "dashed", "dotted"], group=grpMonthlyL)
+
+// Display Options
+grpDisplay = "Display"
+crossed_transparency = input.int(70, "Crossed Levels Transparency (%)", minval=0, maxval=100, group=grpDisplay)
+show_crossed = input(true, "Show Crossed Levels", group=grpDisplay)
+show_labels = input(true, "Show Labels", group=grpDisplay)
+show_price = input(false, "Add Price to Label", group=grpDisplay)
+label_size_input = input.string("small", "Label Size", options=["tiny", "small", "normal"], group=grpDisplay)
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
+
+type Level
+    float price
+    string label_tags
+    int start_bar
+    int cross_bar
+    bool is_high
+    string level_type
+    line ln
+    label lb
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+f_is_timeframe_qualified(string level_type_val) =>
+    tf = timeframe.period
+    is_intraday = (tf == "1" or tf == "3" or tf == "5" or tf == "15" or
+                   tf == "30" or tf == "45" or tf == "60" or tf == "120" or
+                   tf == "180" or tf == "240")
+
+    if level_type_val == "D"
+        is_intraday or tf == "D"
+    else if level_type_val == "W"
+        is_intraday or tf == "D" or tf == "W"
+    else if level_type_val == "M"
+        is_intraday or tf == "D" or tf == "W" or tf == "M"
+    else
+        true
+
+f_get_style(string style_name) =>
+    if style_name == "dashed"
+        line.style_dashed
+    else if style_name == "dotted"
+        line.style_dotted
+    else
+        line.style_solid
+
+f_get_label_size(string size_name) =>
+    if size_name == "tiny"
+        size.tiny
+    else if size_name == "normal"
+        size.large
+    else
+        size.small
+
+f_get_display_color(color base_color, bool is_crossed) =>
+    if is_crossed
+        color.new(base_color, crossed_transparency)
+    else
+        base_color
+
+// ============================================================================
+// GLOBAL STATE
+// ============================================================================
+
+var array<Level> levels = array.new<Level>()
+var line dummy_line = na
+var label dummy_label = na
+
+// ============================================================================
+// MAIN LOGIC
+// ============================================================================
+
+// Fetch data from higher timeframes
+dh_val = request.security(syminfo.tickerid, "D", high)
+dl_val = request.security(syminfo.tickerid, "D", low)
+wh_val = request.security(syminfo.tickerid, "W", high)
+wl_val = request.security(syminfo.tickerid, "W", low)
+mh_val = request.security(syminfo.tickerid, "M", high)
+ml_val = request.security(syminfo.tickerid, "M", low)
+
+// Add new levels when periods close
+if ta.change(time("D")) != 0
+    if dh_enabled and f_is_timeframe_qualified("D") and not na(dh_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == dh_val and lv.is_high and lv.level_type == "D"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(dh_val, "DH", bar_index, 0, true, "D", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+    if dl_enabled and f_is_timeframe_qualified("D") and not na(dl_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == dl_val and not lv.is_high and lv.level_type == "D"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(dl_val, "DL", bar_index, 0, false, "D", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+if ta.change(time("W")) != 0
+    if wh_enabled and f_is_timeframe_qualified("W") and not na(wh_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == wh_val and lv.is_high and lv.level_type == "W"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(wh_val, "WH", bar_index, 0, true, "W", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+    if wl_enabled and f_is_timeframe_qualified("W") and not na(wl_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == wl_val and not lv.is_high and lv.level_type == "W"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(wl_val, "WL", bar_index, 0, false, "W", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+if ta.change(time("M")) != 0
+    if mh_enabled and f_is_timeframe_qualified("M") and not na(mh_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == mh_val and lv.is_high and lv.level_type == "M"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(mh_val, "MH", bar_index, 0, true, "M", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+    if ml_enabled and f_is_timeframe_qualified("M") and not na(ml_val)
+        found_idx = -1
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                lv = array.get(levels, i)
+                if lv.price == ml_val and not lv.is_high and lv.level_type == "M"
+                    found_idx := i
+                    break
+
+        if found_idx >= 0
+            lv = array.get(levels, found_idx)
+            lv.cross_bar := 0
+            array.set(levels, found_idx, lv)
+        else
+            new_lv = Level.new(ml_val, "ML", bar_index, 0, false, "M", dummy_line, dummy_label)
+            array.push(levels, new_lv)
+
+// Update all levels on each bar
+if array.size(levels) > 0
+    for idx = 0 to array.size(levels) - 1
+        lv = array.get(levels, idx)
+
+        // Check if level is crossed
+        is_crossed = lv.cross_bar != 0
+
+        if not is_crossed
+            if lv.is_high and high > lv.price
+                is_crossed := true
+                lv.cross_bar := bar_index
+            else if not lv.is_high and low < lv.price
+                is_crossed := true
+                lv.cross_bar := bar_index
+
+        // Determine visibility
+        should_show = show_crossed or not is_crossed
+
+        if not should_show
+            if not na(lv.ln)
+                line.delete(lv.ln)
+            if not na(lv.lb)
+                label.delete(lv.lb)
+            array.set(levels, idx, lv)
+            continue
+
+        // Get configuration
+        display_color_val = color.new(color.white, 0)
+        line_width = 1
+        line_style = line.style_solid
+
+        if lv.level_type == "D" and lv.is_high
+            display_color_val := dh_color
+            line_width := dh_width
+            line_style := f_get_style(dh_style)
+        else if lv.level_type == "D" and not lv.is_high
+            display_color_val := dl_color
+            line_width := dl_width
+            line_style := f_get_style(dl_style)
+        else if lv.level_type == "W" and lv.is_high
+            display_color_val := wh_color
+            line_width := wh_width
+            line_style := f_get_style(wh_style)
+        else if lv.level_type == "W" and not lv.is_high
+            display_color_val := wl_color
+            line_width := wl_width
+            line_style := f_get_style(wl_style)
+        else if lv.level_type == "M" and lv.is_high
+            display_color_val := mh_color
+            line_width := mh_width
+            line_style := f_get_style(mh_style)
+        else if lv.level_type == "M" and not lv.is_high
+            display_color_val := ml_color
+            line_width := ml_width
+            line_style := f_get_style(ml_style)
+
+        line_x2 = is_crossed ? lv.cross_bar : bar_index
+        display_color = f_get_display_color(display_color_val, is_crossed)
+
+        if na(lv.ln)
+            lv.ln := line.new(lv.start_bar, lv.price, line_x2, lv.price,
+                              xloc=xloc.bar_index, color=display_color,
+                              width=line_width, style=line_style)
+        else
+            line.set_x2(lv.ln, line_x2)
+            line.set_color(lv.ln, display_color)
+
+        if show_labels
+            label_text = lv.label_tags
+            if show_price
+                label_text := label_text + " (" + str.tostring(lv.price, format.price) + ")"
+
+            if na(lv.lb)
+                lv.lb := label.new(bar_index, lv.price, label_text,
+                                  xloc=xloc.bar_index, yloc=yloc.price,
+                                  color=display_color, textcolor=color.white,
+                                  size=f_get_label_size(label_size_input),
+                                  style=label.style_label_left)
+            else
+                label.set_text(lv.lb, label_text)
+                label.set_x(lv.lb, bar_index)
+                label.set_color(lv.lb, display_color)
+
+        array.set(levels, idx, lv)
+
+// Cleanup old levels
+if bar_index % 20 == 0
+    idx = 0
+    while idx < array.size(levels)
+        lv = array.get(levels, idx)
+        bars_old = bar_index - lv.start_bar
+        if bars_old > lookback_depth * 50 and lv.cross_bar != 0
+            if not na(lv.ln)
+                line.delete(lv.ln)
+            if not na(lv.lb)
+                label.delete(lv.lb)
+            array.remove(levels, idx)
+        else
+            idx += 1

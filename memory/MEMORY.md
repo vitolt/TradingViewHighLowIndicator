@@ -1,0 +1,2 @@
+- [Keep Requirements Sync](keep-requirements-file-in-sync.md) — project rule to update REQUIREMENTS.md when specs change
+- [Developer Role: Pine v5](developer-role-pine-v5.md) — role and rules for Pine Script v5 development on TradingView
